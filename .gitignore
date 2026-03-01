@@ -6,3 +6,4 @@
 __pycache__/
 .venv/
 infra/secrets.tfvars
+README-source-coop.md

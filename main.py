@@ -74,7 +74,7 @@ WINDOW_SIZE = 5.0
 # S3 output
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 S3_PREFIX = os.environ.get("S3_PREFIX", "").strip("/")
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+AWS_REGION = os.environ.get("AWS_REGION", "") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 
 # Local scratch directory (NVMe on cloud instance)
 SCRATCH_DIR = Path(os.environ.get("SCRATCH_DIR", "/data/scratch"))
@@ -306,6 +306,13 @@ def load_dem_window(
             nodata = src.nodata
             if nodata is not None:
                 elevation[elevation == nodata] = np.nan
+
+            # Apply scale/offset from raster metadata (GEDTM-30m: scale=0.1, offset=0)
+            scale = src.scales[0] if src.scales else 1.0
+            offset = src.offsets[0] if src.offsets else 0.0
+            if scale != 1.0 or offset != 0.0:
+                elevation = elevation * scale + offset
+
             if np.all(np.isnan(elevation)):
                 return None
 
@@ -448,7 +455,8 @@ def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
             con.sql(f"SET s3_region='{AWS_REGION}'")
             con.sql(f"SET s3_access_key_id='{aws_key}'")
             con.sql(f"SET s3_secret_access_key='{aws_secret}'")
-            log.info("  S3 configured: region=%s, bucket=%s", AWS_REGION, S3_BUCKET)
+            con.sql("SET s3_url_style='path'")
+            log.info("  S3 configured: region=%s, bucket=%s, url_style=path", AWS_REGION, S3_BUCKET)
         else:
             log.warning("  S3_BUCKET set but AWS credentials missing!")
     else:
