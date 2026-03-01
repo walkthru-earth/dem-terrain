@@ -72,14 +72,15 @@ fi
 
 # ---------------------------------------------------------------------------
 # 5. Set environment variables
+# Placeholders __VAR__ are replaced by Terraform at plan/apply time.
 # ---------------------------------------------------------------------------
 echo "--- Configuring environment ---"
 cat > /data/project/dem/.env <<ENVEOF
-S3_BUCKET=${S3_BUCKET:-}
-S3_PREFIX=${S3_PREFIX:-}
-AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
-AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
-AWS_REGION=${AWS_REGION:-us-east-1}
+S3_BUCKET=__S3_BUCKET__
+S3_PREFIX=__S3_PREFIX__
+AWS_ACCESS_KEY_ID=__AWS_ACCESS_KEY_ID__
+AWS_SECRET_ACCESS_KEY=__AWS_SECRET_ACCESS_KEY__
+AWS_REGION=__AWS_REGION__
 SCRATCH_DIR=/data/scratch
 GDAL_CACHEMAX=8192
 GDAL_NUM_THREADS=ALL_CPUS

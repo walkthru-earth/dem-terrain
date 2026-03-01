@@ -22,7 +22,7 @@ variable "ssh_public_key" {
 
 variable "location" {
   type        = string
-  default     = "FIN-01"
+  default     = "FIN-02"
   description = "Verda datacenter location"
 }
 

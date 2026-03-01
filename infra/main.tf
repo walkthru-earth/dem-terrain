@@ -21,9 +21,28 @@ resource "verda_ssh_key" "dem" {
 
 # --- Startup Script ---
 
+locals {
+  startup_script = replace(
+    replace(
+      replace(
+        replace(
+          replace(
+            file("${path.module}/startup.sh"),
+            "__S3_BUCKET__", var.s3_bucket
+          ),
+          "__S3_PREFIX__", var.s3_prefix
+        ),
+        "__AWS_ACCESS_KEY_ID__", var.aws_access_key_id
+      ),
+      "__AWS_SECRET_ACCESS_KEY__", var.aws_secret_access_key
+    ),
+    "__AWS_REGION__", var.aws_region
+  )
+}
+
 resource "verda_startup_script" "dem" {
   name   = "dem-processing-setup"
-  script = file("${path.module}/startup.sh")
+  script = local.startup_script
 }
 
 # --- 2TB NVMe Volume ---
@@ -46,13 +65,4 @@ resource "verda_instance" "dem" {
   ssh_key_ids       = [verda_ssh_key.dem.id]
   startup_script_id = verda_startup_script.dem.id
   existing_volumes  = [verda_volume.data.id]
-
-  environment = {
-    S3_BUCKET             = var.s3_bucket
-    S3_PREFIX             = var.s3_prefix
-    AWS_ACCESS_KEY_ID     = var.aws_access_key_id
-    AWS_SECRET_ACCESS_KEY = var.aws_secret_access_key
-    AWS_REGION            = var.aws_region
-    SCRATCH_DIR           = "/data/scratch"
-  }
 }

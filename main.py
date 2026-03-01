@@ -488,7 +488,7 @@ def write_parquet_for_resolution(
     con.register("tile_df", table)
 
     if S3_BUCKET:
-        output_base = f"s3://{S3_BUCKET}/{S3_PREFIX}/dem-terrain"
+        output_base = f"s3://{S3_BUCKET}/{S3_PREFIX}"
     else:
         output_base = str(SCRATCH_DIR / "output" / "dem-terrain")
         Path(output_base).mkdir(parents=True, exist_ok=True)
@@ -608,7 +608,7 @@ def write_metadata(total_cells: dict[int, int], elapsed_seconds: float) -> None:
         import boto3
 
         s3 = boto3.client("s3", region_name=AWS_REGION)
-        key = f"{S3_PREFIX}/dem-terrain/_metadata.json" if S3_PREFIX else "dem-terrain/_metadata.json"
+        key = f"{S3_PREFIX}/_metadata.json" if S3_PREFIX else "dem-terrain/_metadata.json"
         s3.put_object(
             Bucket=S3_BUCKET,
             Key=key,
@@ -758,7 +758,7 @@ def main() -> None:
     log.info("=" * 60)
     log.info("Starting DEM to Parquet pipeline")
     log.info("  Target resolutions: %s", sorted(target_resolutions))
-    log.info("  Output: %s", f"s3://{S3_BUCKET}/{S3_PREFIX}/dem-terrain/" if S3_BUCKET else "local")
+    log.info("  Output: %s", f"s3://{S3_BUCKET}/{S3_PREFIX}/" if S3_BUCKET else "local")
     log.info("  Scratch: %s", SCRATCH_DIR)
     log.info("  Memory: %s", _mem_gb())
     log.info("=" * 60)
