@@ -1,40 +1,36 @@
 # GDAL Analysis for DEM-Terrain Pipeline
 
-> Investigated 2026-03-01. VPS instance: 86.38.238.25 (Verda CPU.360V.1440G, FIN-02).
+> Investigated 2026-03-01. Updated 2026-03-02.
 
-## VPS Installed Version
-
-**GDAL 3.8.4** (released 2024-02-08) — shipped with Ubuntu 24.04 `gdal-bin` package.
-
-- `gdaldem` available at `/usr/bin/gdaldem`
-- Supports: slope, aspect, TRI, TPI, roughness, hillshade
-- **No Parquet vector driver** (`ogr2ogr --formats` has no Parquet entry)
-- No `gdal raster pipeline` CLI (added in 3.11)
-- No native Parquet GEOMETRY type support (added in 3.12)
-
-## Latest Stable Version
+## GDAL 3.12.2
 
 **GDAL 3.12.2** (released 2026-02-09), following 3.12.0 "Chicoutimi" (2025-11-07).
 
-## Key New Features (3.11 → 3.12) Relevant to This Project
+## Key Features Relevant to This Project
 
 ### `gdal raster pipeline` (3.11+)
 
 New unified CLI with streaming block-based evaluation (no full raster in memory):
 
 ```bash
-# Example: compute slope from COG
+# Example: compute slope from COG → native Parquet GEOMETRY
 gdal raster pipeline \
   read dem.tif \
   ! slope --unit degree \
-  ! write slope_output.tif
+  ! as-features --geometry-type point --include-xy \
+  ! write slope.parquet -f Parquet \
+    -lco USE_PARQUET_GEO_TYPES=YES -lco COMPRESSION=ZSTD
 
 # Chain with tee for multiple outputs
 gdal raster pipeline \
   read dem.tif \
   ! tee \
-    [ slope --unit degree ! write slope.tif ] \
-    [ aspect ! write aspect.tif ]
+    [ slope --unit degree ! as-features --geometry-type point --include-xy \
+      ! write slope.parquet -f Parquet \
+        -lco USE_PARQUET_GEO_TYPES=YES -lco COMPRESSION=ZSTD ] \
+    [ aspect ! as-features --geometry-type point --include-xy \
+      ! write aspect.parquet -f Parquet \
+        -lco USE_PARQUET_GEO_TYPES=YES -lco COMPRESSION=ZSTD ]
 ```
 
 Terrain derivative subcommands:
@@ -58,19 +54,21 @@ Raster-to-vector conversion — one feature per pixel:
 gdal pipeline \
   read dem.tif \
   ! as-features --geometry-type point --include-xy \
-  ! write output.parquet -f Parquet
+  ! write output.parquet -f Parquet \
+    -lco USE_PARQUET_GEO_TYPES=YES -lco COMPRESSION=ZSTD
 ```
 
 ### Native Parquet GEOMETRY Type (3.12)
 
 GDAL 3.12 can write the native Parquet 2.11+ `GEOMETRY` logical type via:
 
-```
-ogr2ogr -f Parquet output.parquet input.geojson \
-  -lco USE_PARQUET_GEO_TYPES=YES
+```bash
+ogr2ogr -f Parquet output.parquet input.fgb \
+  -lco USE_PARQUET_GEO_TYPES=YES \
+  -lco COMPRESSION=ZSTD
 ```
 
-Writes per-row-group bounding box statistics automatically. Requires libarrow >= 21.
+Writes per-row-group bounding box statistics automatically. Requires libarrow >= 21. All Parquet commands in this doc use `USE_PARQUET_GEO_TYPES=YES` for native geometry.
 
 ### Other Improvements
 
@@ -94,51 +92,73 @@ Writes per-row-group bounding box statistics automatically. Requires libarrow >=
 | S3 upload with prefix layout | No (would need separate aws cli) | Built into pipeline |
 | Single Parquet file per resolution | Awkward (as-features produces one huge file per derivative, not per resolution) | merge_temp_to_final() per resolution |
 
-### What GDAL *Could* Help With
+### Recommendation
 
-1. **Pre-computing derivative rasters** — run `gdaldem slope/aspect/TRI/TPI` once on the 305 GB COG to produce 4 derivative GeoTIFFs on NVMe. Then our Python pipeline reads 5 bands (elev + 4 derivatives) instead of computing derivatives in NumPy.
-   - **Pro**: Simpler Python code, `gdaldem` is battle-tested and handles edge cases (nodata, poles)
-   - **Con**: 4 × 305 GB = ~1.2 TB extra disk (we have 2 TB NVMe, COG is 305 GB, leaves ~1.4 TB — tight but possible). Also 4 sequential full reads of the COG.
+**Keep the current Python pipeline.** The GDAL CLI approach would be slower (multiple passes), use more disk, and still require Python for H3 + DuckDB Parquet.
 
-2. **Validation** — use `gdaldem` to spot-check our NumPy terrain derivatives against GDAL's reference implementation.
+GDAL 3.12's `gdal raster pipeline ! as-features ! write Parquet` could be useful for simpler raster-to-Parquet conversions that don't need H3 indexing.
 
-### Hybrid Approach (Possible but Not Recommended)
+## Contour Line Generation
 
-```bash
-# Step 1: Pre-compute derivatives (4 passes, ~2 hours each)
-gdaldem slope  /data/scratch/gedtm30.tif /data/scratch/slope.tif  -compute_edges
-gdaldem aspect /data/scratch/gedtm30.tif /data/scratch/aspect.tif -compute_edges
-gdaldem TRI    /data/scratch/gedtm30.tif /data/scratch/tri.tif
-gdaldem TPI    /data/scratch/gedtm30.tif /data/scratch/tpi.tif
+> Investigated 2026-03-02.
 
-# Step 2: Python reads 5 files via windowed reads, generates H3 cells, writes Parquet
-# (Simpler compute_terrain_derivatives — just interpolate, no gradient computation)
+### Source Raster Metadata
+
+```
+File:      /data/scratch/gedtm30.tif (305 GB COG)
+Size:      1,440,010 × 600,010 px
+DataType:  Int32
+NoData:    -2147483648
+Scale:     0.1  (raw values = decimeters)
+Offset:    0.0
+Mean:      6501.9 raw = 650.2 m
+StdDev:    8383.1 raw = 838.3 m
+Block:     2048 × 2048
+CRS:       EPSG:4326 (WGS 84)
+Overviews: 10 levels (720005×300005 → 1406×585)
 ```
 
-**Why not recommended for us:**
-- Uses ~1.5 TB disk (tight on 2 TB NVMe with COG + output)
-- 4 sequential full reads of 305 GB = ~8 hours just for derivative computation
-- Our NumPy approach computes all 4 derivatives in a single window read (~0.1 sec per window)
-- The derivative computation is not the bottleneck — H3 cell generation and Parquet writing are
+### Contour Interval Choice
 
-## Recommendation
+For a 30m DEM with ~2-5m vertical accuracy:
 
-**Keep the current Python pipeline.** The GDAL CLI approach would be slower (multiple passes), use more disk, and still require Python for H3 + DuckDB Parquet. The only reason to upgrade GDAL on the VPS would be for validation/debugging — not worth the effort for this one-time pipeline.
+| Interval | Use Case | Output Size (est.) |
+|----------|----------|--------------------|
+| 100 m | Standard (1:250k–1:1M maps) | ~50-100 GB |
+| 50 m | Detailed (1:100k maps) | ~100-200 GB |
+| 20 m | High detail (pushes DEM accuracy) | ~300-500 GB |
 
-If we ever need to reprocess, GDAL 3.12's `gdal raster pipeline ! as-features ! write Parquet` could be useful for simpler raster-to-Parquet conversions that don't need H3 indexing.
+**Recommended: 100m** — best match for 30m DEM accuracy.
 
-## Version Comparison
+### Command
 
-| Feature | GDAL 3.8.4 (VPS) | GDAL 3.12.2 (Latest) |
-|---------|-------------------|----------------------|
-| `gdaldem` slope/aspect/TRI/TPI | Yes | Yes |
-| `gdal raster pipeline` | No | Yes |
-| `gdal raster as-features` | No | Yes |
-| Parquet vector driver | No | Yes |
-| Native Parquet GEOMETRY type | No | Yes (`USE_PARQUET_GEO_TYPES=YES`) |
-| Geometry shredding | No | No (DuckDB 1.5 only) |
-| COG streaming reads | Yes | Yes (improved) |
-| H3 indexing | No | No |
+```bash
+# Step 1: VRT that converts decimeters → meters (tiny file, lazy scaling)
+gdal_translate -of VRT -unscale -ot Float32 \
+  /data/scratch/gedtm30.tif /data/scratch/gedtm30_meters.vrt
+
+# Step 2: Generate 100m contour lines → native Parquet GEOMETRY
+#   - `-a elev`: elevation attribute in meters (from VRT)
+#   - `-i 100`: 100m interval
+#   - `-3d`: LineStringZ (elevation baked into vertices)
+#   - NoData (-2147483648 raw) carried by VRT, auto-skipped
+gdal_contour \
+  -a elev \
+  -i 100 \
+  -3d \
+  -nln contours \
+  -f Parquet \
+  -lco COMPRESSION=ZSTD \
+  -lco USE_PARQUET_GEO_TYPES=YES \
+  -lco ROW_GROUP_SIZE=100000 \
+  /data/scratch/gedtm30_meters.vrt \
+  /data/scratch/contours.parquet
+```
+
+### Performance Notes
+
+- `gdal_contour` is **single-threaded** — expect 24-48h for the full 305 GB COG
+- Output size: ~50-100 GB at 100m interval (hundreds of millions of LineStringZ features)
 
 ## References
 
