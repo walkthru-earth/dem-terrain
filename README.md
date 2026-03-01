@@ -1,28 +1,31 @@
 # dem-terrain
 
-One-time pipeline that converts the [GEDTM-30m](https://github.com/openlandmap/GEDTM30) global DEM into H3-indexed [native Parquet 2.11+](https://github.com/apache/parquet-format/blob/master/Geospatial.md) files with pre-computed terrain derivatives.
+One-time pipeline that converts the [GEDTM-30m](https://doi.org/10.5281/zenodo.10530768) global DEM into H3-indexed [native Parquet 2.11+](https://github.com/apache/parquet-format/blob/master/Geospatial.md) files with pre-computed terrain derivatives.
 
 Replaces the 20-40 min on-the-fly DEM load in [walkthru-weather-index](../walkthru-weather-index/) with a ~5 second Parquet scan.
 
 ## What it produces
 
 ```
-s3://{bucket}/{prefix}/dem-terrain/
+s3://{bucket}/{prefix}/
+  h3_res=1/data.parquet       11 KB       223 cells
+  h3_res=2/data.parquet       56 KB     1,546 cells
+  h3_res=3/data.parquet      372 KB    10,851 cells
+  h3_res=4/data.parquet      2.5 MB    76,135 cells
+  h3_res=5/data.parquet       17 MB   533,062 cells
+  h3_res=6/data.parquet      ~70 MB      ~4M cells
+  h3_res=7/data.parquet     ~500 MB     ~28M cells
+  h3_res=8/data.parquet     ~3.5 GB    ~200M cells
+  h3_res=9/data.parquet      ~25 GB    ~1.4B cells
+  h3_res=10/data.parquet    ~170 GB     ~10B cells
   _metadata.json
-  h3_res=1/data.parquet          # ~250 cells
-  h3_res=2/data.parquet          # ~1,800 cells
-  ...
-  h3_res=5/data.parquet          # ~600K cells
-  h3_res=6/h3_parent_2={id}/data.parquet   # partitioned, ~4.2M cells total
-  ...
-  h3_res=10/h3_parent_2={id}/data.parquet  # partitioned, ~10B cells total
 ```
 
-Each file contains: `h3_index`, `geometry` (native Parquet GEOMETRY), `lat`, `lon`, `elev`, `slope`, `aspect`, `tri`, `tpi`.
+Single file per resolution, sorted by `h3_index`. Schema: `h3_index` (VARCHAR), `geometry` (native Parquet GEOMETRY POINT EPSG:4326), `lat`, `lon`, `elev`, `slope`, `aspect`, `tri`, `tpi` (all FLOAT).
 
 ## Prerequisites
 
-- [uv](https://docs.astral.sh/uv/) (Python package manager)
+- [uv](https://docs.astral.sh/uv/)
 - [OpenTofu](https://opentofu.org/) (for cloud deployment)
 - AWS credentials with S3 write access
 - Verda cloud account (for cloud instance)
@@ -30,64 +33,50 @@ Each file contains: `h3_index`, `geometry` (native Parquet GEOMETRY), `lat`, `lo
 ## Quick start
 
 ```bash
-# Clone and enter the project
-cd dem/
-
-# Install dependencies
 uv sync
 
-# Copy and fill in your credentials
-cp .env.example .env
-# edit .env with your S3 bucket, AWS keys, etc.
+cp .env.example .env   # fill in S3 bucket, AWS keys
 
-# Dry run — check STAC catalog connectivity
-uv run python main.py --dry-run
-
-# Run locally (low resolutions only, for testing)
-uv run python main.py --resolutions 1,2,3,4,5 --scratch-dir ./scratch
+uv run python main.py --dry-run                                      # list windows
+uv run python main.py --resolutions 1,2,3,4,5 --scratch-dir ./scratch  # local test
 ```
 
-## Cloud deployment (full global run)
+## Cloud deployment
 
-The full pipeline (res 1-10) needs a CPU Node with ~1440 GB RAM (360 vCPUs). See [docs/workflow.md](docs/workflow.md) for the complete workflow.
+The full pipeline (res 1-10) needs ~1440 GB RAM. Uses a Verda CPU Node (360 vCPUs).
 
 ```bash
 cd infra/
+cp secrets.tfvars.example secrets.tfvars   # fill in credentials
+tofu init && tofu apply -var-file="secrets.tfvars"
 
-# Create secrets.tfvars (see infra/variables.tf for all vars)
-cat > secrets.tfvars <<EOF
-verda_client_id     = "your-client-id"
-verda_client_secret = "your-client-secret"
-ssh_public_key      = "ssh-ed25519 AAAA..."
-s3_bucket           = "your-bucket"
-s3_prefix           = "your-prefix"
-aws_access_key_id   = "AKIA..."
-aws_secret_access_key = "..."
-EOF
-
-# Deploy
-tofu init
-tofu plan -var-file="secrets.tfvars"
-tofu apply -var-file="secrets.tfvars"
-
-# SSH in and monitor
 ssh root@$(tofu output -raw instance_ip)
-tmux attach -t dem
+tmux attach -t dem                          # watch pipeline
+tail -f /data/scratch/pipeline.log          # or tail logs
 
-# After completion, tear down
-tofu destroy -var-file="secrets.tfvars"
+tofu destroy -var-file="secrets.tfvars"     # tear down after
 ```
+
+## Resumability
+
+The pipeline checkpoints to `/data/scratch/checkpoint.json` at two levels:
+
+1. **Window level** — each completed or skipped window is recorded. On restart, these are skipped.
+2. **Resolution merge level** — after DuckDB merges temp files to S3, it's recorded. Already-merged resolutions are skipped on restart.
+
+Temp Parquet files in `/data/scratch/temp/{group}/` survive restarts. To resume after a crash or interruption, just rerun the same command — it picks up where it left off.
+
+To force a full rerun: `rm /data/scratch/checkpoint.json`
 
 ## Query the output
 
 ```sql
--- DuckDB
 INSTALL spatial; LOAD spatial;
-INSTALL httpfs; LOAD httpfs;
-SET s3_region = 'us-east-1';
+INSTALL httpfs;  LOAD httpfs;
+SET s3_region = 'us-west-2';
 
-SELECT h3_index, elev, slope
-FROM read_parquet('s3://bucket/prefix/dem-terrain/h3_res=5/data.parquet')
+SELECT h3_index, elev, slope, aspect, tri, tpi
+FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/h3_res=5/data.parquet')
 WHERE lat BETWEEN 27.5 AND 28.5
   AND lon BETWEEN 86.5 AND 87.5
 ORDER BY elev DESC
@@ -97,23 +86,13 @@ LIMIT 5;
 ## Development
 
 ```bash
-# Install dev dependencies
 uv sync --group dev
-
-# Setup pre-commit hooks
 uv run pre-commit install
-
-# Lint and format
-uv run ruff check .
-uv run ruff format .
+uv run ruff check . && uv run ruff format .
 ```
-
-## Docs
-
-- [docs/workflow.md](docs/workflow.md) — full pipeline workflow, architecture, and processing details
 
 ## License
 
-This project is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). See [LICENSE](LICENSE) for details.
+This project is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) by [walkthru.earth](https://github.com/walkthru-earth). See [LICENSE](LICENSE) for details. The source [GEDTM-30m](https://doi.org/10.5281/zenodo.10530768) is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) by [OpenGeoHub](https://opengeohub.org/).
 
 Contact: [hi@walkthru.earth](mailto:hi@walkthru.earth)

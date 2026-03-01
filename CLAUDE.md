@@ -19,7 +19,7 @@ Reads a single global GEDTM-30m COG (~305 GB) via windowed reads, computes terra
 - **CPU Node** (no GPU) — terrain derivatives run fine on NumPy with 360 cores. CuPy/GPU fallback exists but isn't needed
 - **Single file per resolution** — no Hive partitioning; DuckDB native geometry gives per-row-group bbox pushdown
 - **Local COG auto-detection** — uses local file on NVMe if available, falls back to remote URL
-- **Checkpointing** — `checkpoint.json` tracks completed windows, pipeline is resumable
+- **Checkpointing** — `checkpoint.json` tracks completed windows and merged resolutions, pipeline is fully resumable (see below)
 
 ## Output layout
 
@@ -55,6 +55,15 @@ tmux attach -t dem                                    # watch pipeline
 tail -f /data/scratch/pipeline.log                    # or tail logs
 tofu destroy -var-file="secrets.tfvars"               # tear down after
 ```
+
+## Resumability
+
+The pipeline checkpoints to `/data/scratch/checkpoint.json` at two levels:
+
+1. **Window level** — each completed or skipped window is recorded (`completed_windows`). On restart, these are skipped.
+2. **Resolution merge level** — after DuckDB merges temp files to S3, it's recorded (`completed_resolutions`). Already-merged resolutions are skipped on restart.
+
+Temp Parquet files in `/data/scratch/temp/{group}/` survive restarts. To resume after a crash, just rerun — it picks up where it left off. To force a full rerun: `rm /data/scratch/checkpoint.json`
 
 ## Conventions
 
