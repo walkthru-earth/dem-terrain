@@ -1,6 +1,6 @@
 # dem-terrain
 
-One-time pipeline that converts the [GEDTM-30m](https://doi.org/10.5281/zenodo.10530768) global DEM into H3-indexed [native Parquet 2.11+](https://github.com/apache/parquet-format/blob/master/Geospatial.md) files with pre-computed terrain derivatives.
+One-time pipeline that converts the [GEDTM-30m](https://stac.openlandmap.org/gedtm-30m/collection.json) global DEM into H3-indexed [native Parquet 2.11+](https://github.com/apache/parquet-format/blob/master/Geospatial.md) files with pre-computed terrain derivatives.
 
 Replaces the 20-40 min on-the-fly DEM load in [walkthru-weather-index](../walkthru-weather-index/) with a ~5 second Parquet scan.
 
@@ -93,6 +93,6 @@ uv run ruff check . && uv run ruff format .
 
 ## License
 
-This project is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) by [walkthru.earth](https://github.com/walkthru-earth). See [LICENSE](LICENSE) for details. The source [GEDTM-30m](https://doi.org/10.5281/zenodo.10530768) is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) by [OpenGeoHub](https://opengeohub.org/).
+This project is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) by [walkthru.earth](https://github.com/walkthru-earth). See [LICENSE](LICENSE) for details. The source [GEDTM-30m](https://doi.org/10.5281/zenodo.14900181) is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) by [OpenGeoHub](https://opengeohub.org/).
 
 Contact: [hi@walkthru.earth](mailto:hi@walkthru.earth)
