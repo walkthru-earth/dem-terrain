@@ -7,10 +7,15 @@ DuckDB 1.5.0-dev writes native Parquet GEOMETRY (first-class logical type with
 per-row-group bounding box stats, geometry shredding, and spatial predicate
 pushdown). This is NOT GeoParquet's metadata convention.
 
+The pipeline reads from a single global COG (Cloud Optimized GeoTIFF) using
+windowed reads. If a local copy exists on NVMe, it uses that for speed;
+otherwise it reads directly from the remote URL via GDAL vsicurl.
+
 Usage:
     uv run main.py                          # Full global processing
     uv run main.py --resolutions 1,2,3,4,5  # Only low-res
-    uv run main.py --dry-run                # List tiles without processing
+    uv run main.py --dry-run                # List windows without processing
+    uv run main.py --dem-path /data/scratch/gedtm30.tif  # Explicit local COG
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import json
 import logging
 import os
 import resource
+import shutil
 import sys
 import time
 from dataclasses import dataclass
@@ -28,8 +34,9 @@ import duckdb
 import h3
 import numpy as np
 import pyarrow as pa
+import pyarrow.parquet as pq
 import rasterio
-from pystac_client import Client as STACClient
+from rasterio.windows import from_bounds
 from scipy.interpolate import RegularGridInterpolator
 from tqdm import tqdm
 
@@ -54,8 +61,15 @@ def _mem_gb() -> str:
 # Configuration
 # ---------------------------------------------------------------------------
 
-STAC_URL = "https://stac.openlandmap.org"
-COLLECTION = "gedtm-30m"
+# GEDTM-30m: single global COG hosted on OpenGeoHub S3
+# 1,440,010 x 600,010 px, int32, 2048x2048 blocks, 10 overviews (2-1024x)
+DEM_COG_URL = "https://s3.opengeohub.org/global/edtm/legendtm_rf_30m_m_s_20000101_20231231_go_epsg.4326_v20250130.tif"
+
+# Default local COG filename (looked up in SCRATCH_DIR)
+LOCAL_COG_NAME = "gedtm30.tif"
+
+# Processing window size (degrees) — each chunk is read independently
+WINDOW_SIZE = 5.0
 
 # S3 output
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
@@ -69,9 +83,6 @@ CHECKPOINT_FILE = SCRATCH_DIR / "checkpoint.json"
 # GEDTM-30m extent (lat -65 to 85, lon -180 to 180)
 LAT_MIN, LAT_MAX = -65.0, 85.0
 LON_MIN, LON_MAX = -180.0, 180.0
-
-# H3 parent resolution for sub-partitioning res 6-10 files
-H3_PARENT_RES = 2
 
 
 @dataclass
@@ -168,26 +179,18 @@ def compute_terrain_derivatives(
     aspect_deg = xp.degrees(aspect_rad)
     aspect_deg = xp.where(aspect_deg < 0, aspect_deg + 360.0, aspect_deg)
 
-    # TRI (Terrain Ruggedness Index): mean absolute difference from neighbors
-    # Using a 3x3 kernel
+    # TRI and TPI via 3x3 neighborhood
     padded = xp.pad(elev, 1, mode="edge")
     tri_sum = xp.zeros_like(elev)
-    for di in range(-1, 2):
-        for dj in range(-1, 2):
-            if di == 0 and dj == 0:
-                continue
-            neighbor = padded[1 + di : 1 + di + elev.shape[0], 1 + dj : 1 + dj + elev.shape[1]]
-            tri_sum += xp.abs(neighbor - elev)
-    tri = tri_sum / 8.0
-
-    # TPI (Topographic Position Index): elevation minus mean of neighbors
     neighbor_sum = xp.zeros_like(elev)
     for di in range(-1, 2):
         for dj in range(-1, 2):
             if di == 0 and dj == 0:
                 continue
             neighbor = padded[1 + di : 1 + di + elev.shape[0], 1 + dj : 1 + dj + elev.shape[1]]
+            tri_sum += xp.abs(neighbor - elev)
             neighbor_sum += neighbor
+    tri = tri_sum / 8.0
     tpi = elev - neighbor_sum / 8.0
 
     # Transfer back to CPU if on GPU
@@ -196,7 +199,6 @@ def compute_terrain_derivatives(
         aspect_deg = cp.asnumpy(aspect_deg)
         tri = cp.asnumpy(tri)
         tpi = cp.asnumpy(tpi)
-        elev = cp.asnumpy(elev)
 
     return {
         "slope": slope_deg.astype(np.float32),
@@ -207,58 +209,80 @@ def compute_terrain_derivatives(
 
 
 # ---------------------------------------------------------------------------
-# STAC tile discovery
+# DEM source resolution
 # ---------------------------------------------------------------------------
 
 
-def discover_tiles() -> list[dict]:
-    """Query GEDTM-30m STAC catalog for all available COG tile URLs.
+def resolve_dem_path(explicit_path: str | None) -> str:
+    """Determine the DEM source: explicit path > local COG > remote URL."""
+    if explicit_path:
+        p = Path(explicit_path)
+        if p.exists():
+            log.info("Using explicit DEM path: %s (%.1f GB)", p, p.stat().st_size / 1e9)
+            return str(p)
+        log.warning("Explicit DEM path %s not found, trying defaults", p)
 
-    Returns list of dicts with keys: id, url, bbox (west, south, east, north).
-    """
-    log.info("Discovering GEDTM-30m tiles from STAC catalog...")
-    client = STACClient.open(STAC_URL)
+    local = SCRATCH_DIR / LOCAL_COG_NAME
+    if local.exists():
+        size_gb = local.stat().st_size / 1e9
+        log.info("Using local COG: %s (%.1f GB)", local, size_gb)
+        return str(local)
 
-    tiles = []
-    search = client.search(
-        collections=[COLLECTION],
-        bbox=[LON_MIN, LAT_MIN, LON_MAX, LAT_MAX],
-        max_items=None,
+    log.info("No local COG found at %s — using remote URL (slower)", local)
+    log.info(
+        "  Tip: download first with aria2c -x16 -s16 -k50M -d %s -o %s '%s'",
+        SCRATCH_DIR,
+        LOCAL_COG_NAME,
+        DEM_COG_URL,
     )
-    for item in search.items():
-        # GEDTM-30m items have a COG asset (typically "dtm" or "data")
-        asset = None
-        for key in ("dtm", "data", "image"):
-            if key in item.assets:
-                asset = item.assets[key]
-                break
-        if asset is None:
-            # Fall back to first asset with a GeoTIFF media type
-            for a in item.assets.values():
-                if a.media_type and "tiff" in a.media_type.lower():
-                    asset = a
-                    break
-        if asset is None:
-            log.warning("Skipping item %s — no COG asset found", item.id)
-            continue
-
-        bbox = item.bbox  # [west, south, east, north]
-        tiles.append({"id": item.id, "url": asset.href, "bbox": bbox})
-
-    log.info("Discovered %d tiles", len(tiles))
-    return tiles
+    return DEM_COG_URL
 
 
 # ---------------------------------------------------------------------------
-# Tile processing
+# Window generation
 # ---------------------------------------------------------------------------
 
 
-def load_dem_tile(url: str, target_resolution: float, bbox: list[float]) -> dict | None:
-    """Load a DEM COG tile at the target resolution via rasterio.
+def generate_windows() -> list[dict]:
+    """Generate non-overlapping geographic windows covering the DEM extent.
 
-    Returns dict with keys: elevation (2D ndarray), lats (1D), lons (1D),
-    pixel_size_x, pixel_size_y, or None if the tile has no valid data.
+    Returns list of dicts with keys: id, bbox [west, south, east, north].
+    Windows are 5x5 degrees by default (WINDOW_SIZE).
+    """
+    windows = []
+    lon = LON_MIN
+    while lon < LON_MAX:
+        lon_end = min(lon + WINDOW_SIZE, LON_MAX)
+        lat = LAT_MIN
+        while lat < LAT_MAX:
+            lat_end = min(lat + WINDOW_SIZE, LAT_MAX)
+            win_id = f"w_{lon:+08.1f}_{lat:+07.1f}"
+            windows.append(
+                {
+                    "id": win_id,
+                    "bbox": [lon, lat, lon_end, lat_end],
+                }
+            )
+            lat = lat_end
+        lon = lon_end
+    return windows
+
+
+# ---------------------------------------------------------------------------
+# Window processing
+# ---------------------------------------------------------------------------
+
+
+def load_dem_window(
+    dem_path: str,
+    bbox: list[float],
+    target_resolution: float,
+) -> dict | None:
+    """Read a geographic window from the COG at target resolution.
+
+    Uses rasterio windowed reads with automatic overview selection.
+    Returns dict with keys: elevation (2D), lats (1D), lons (1D),
+    pixel_size_x, pixel_size_y, or None if the window has no valid data.
     """
     west, south, east, north = bbox
     width = round((east - west) / target_resolution)
@@ -270,9 +294,11 @@ def load_dem_tile(url: str, target_resolution: float, bbox: list[float]) -> dict
 
     t0 = time.time()
     try:
-        with rasterio.open(url) as src:
+        with rasterio.open(dem_path) as src:
+            window = from_bounds(west, south, east, north, src.transform)
             elevation = src.read(
                 1,
+                window=window,
                 out_shape=(height, width),
                 resampling=rasterio.enums.Resampling.bilinear,
             ).astype(np.float32)
@@ -281,7 +307,6 @@ def load_dem_tile(url: str, target_resolution: float, bbox: list[float]) -> dict
             if nodata is not None:
                 elevation[elevation == nodata] = np.nan
             if np.all(np.isnan(elevation)):
-                log.info("  DEM tile all-NaN, skipping")
                 return None
 
             pixel_size_x = (east - west) / width
@@ -306,24 +331,26 @@ def load_dem_tile(url: str, target_resolution: float, bbox: list[float]) -> dict
                 "pixel_size_y": pixel_size_y,
             }
     except Exception as e:
-        log.warning("  DEM load FAILED (%.1fs): %s", time.time() - t0, e)
+        log.warning("  DEM window load FAILED (%.1fs): %s", time.time() - t0, e)
         return None
 
 
-def generate_h3_cells_for_tile(
+def generate_h3_cells_for_window(
     bbox: list[float],
     h3_res: int,
 ) -> list[str]:
-    """Generate H3 cell IDs that have their center within the tile bbox.
+    """Generate H3 cell IDs that have their center within the window bbox.
 
-    Ownership rule: a cell belongs to a tile if its center falls within the
-    tile's bounding box. This ensures each cell is processed exactly once.
+    Ownership rule: a cell belongs to a window if its center falls within
+    the bounding box. This ensures each cell is processed exactly once
+    across non-overlapping windows.
     """
     west, south, east, north = bbox
 
-    # Use h3.h3shape_to_cells with a polygon covering the bbox
-    # Add a small buffer to ensure edge cells are included
-    buffer = h3.average_hexagon_edge_length(h3_res, unit="deg") * 1.5
+    # Buffer in degrees (convert from km)
+    edge_km = h3.average_hexagon_edge_length(h3_res, unit="km")
+    buffer = (edge_km / 111.32) * 1.5
+
     poly = h3.LatLngPoly(
         [
             (south - buffer, west - buffer),
@@ -334,14 +361,14 @@ def generate_h3_cells_for_tile(
     )
     candidate_cells = h3.h3shape_to_cells(poly, h3_res)
 
-    # Filter: keep only cells whose center falls strictly within the tile bbox
-    owned_cells = []
-    for cell in candidate_cells:
-        lat, lon = h3.cell_to_latlng(cell)
-        if south <= lat < north and west <= lon < east:
-            owned_cells.append(cell)
+    if not candidate_cells:
+        return []
 
-    return owned_cells
+    # Vectorized ownership filter
+    coords = np.array([h3.cell_to_latlng(c) for c in candidate_cells])
+    cells_list = list(candidate_cells)
+    mask = (coords[:, 0] >= south) & (coords[:, 0] < north) & (coords[:, 1] >= west) & (coords[:, 1] < east)
+    return [cells_list[i] for i in np.nonzero(mask)[0]]
 
 
 def interpolate_terrain_to_cells(
@@ -430,62 +457,33 @@ def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
     return con
 
 
-def write_parquet_for_resolution(
+def merge_temp_to_final(
     con: duckdb.DuckDBPyConnection,
-    records: list[dict[str, list]],
+    temp_dir: Path,
     h3_res: int,
 ) -> int:
-    """Write accumulated records for a single H3 resolution to Parquet.
+    """Merge temp Parquet files into a single output file per resolution.
 
-    For res 1-5: single file.
-    For res 6-10: Hive-partitioned by H3 parent at res 2.
+    DuckDB 1.5 native Parquet GEOMETRY writes per-row-group bbox stats
+    automatically, so a single sorted file supports spatial filter pushdown
+    without Hive partitioning.
 
-    Returns the number of rows written.
+    Returns total row count.
     """
-    # Merge all tile records into flat arrays
-    merged = {k: [] for k in ("h3_index", "lat", "lon", "elev", "slope", "aspect", "tri", "tpi")}
-    for rec in records:
-        for k in merged:
-            merged[k].extend(rec[k])
-
-    if not merged["h3_index"]:
-        log.warning("No data for H3 res %d — skipping", h3_res)
+    res_temp_dir = temp_dir / f"h3_res={h3_res}"
+    if not res_temp_dir.exists():
+        log.warning("No temp data for H3 res %d — skipping", h3_res)
         return 0
 
-    # Deduplicate by h3_index (shouldn't happen with ownership rule, but safety net)
-    raw_count = len(merged["h3_index"])
-    seen = set()
-    unique_indices = []
-    for i, idx in enumerate(merged["h3_index"]):
-        if idx not in seen:
-            seen.add(idx)
-            unique_indices.append(i)
+    temp_glob = str(res_temp_dir / "*.parquet")
 
-    dupes = raw_count - len(unique_indices)
-    for k in merged:
-        merged[k] = [merged[k][i] for i in unique_indices]
+    # Count rows
+    total_rows = con.sql(f"SELECT count(*) FROM read_parquet('{temp_glob}')").fetchone()[0]
+    if total_rows == 0:
+        log.warning("No rows for H3 res %d — skipping", h3_res)
+        return 0
 
-    total_rows = len(merged["h3_index"])
-    if dupes > 0:
-        log.info("Writing H3 res %d: %d cells (%d dupes removed)", h3_res, total_rows, dupes)
-    else:
-        log.info("Writing H3 res %d: %d cells", h3_res, total_rows)
-
-    # Create Arrow table
-    table = pa.table(
-        {
-            "h3_index": pa.array(merged["h3_index"], type=pa.string()),
-            "lat": pa.array(merged["lat"], type=pa.float32()),
-            "lon": pa.array(merged["lon"], type=pa.float32()),
-            "elev": pa.array(merged["elev"], type=pa.float32()),
-            "slope": pa.array(merged["slope"], type=pa.float32()),
-            "aspect": pa.array(merged["aspect"], type=pa.float32()),
-            "tri": pa.array(merged["tri"], type=pa.float32()),
-            "tpi": pa.array(merged["tpi"], type=pa.float32()),
-        }
-    )
-
-    con.register("tile_df", table)
+    log.info("Merging H3 res %d: %d cells from temp files", h3_res, total_rows)
 
     if S3_BUCKET:
         output_base = f"s3://{S3_BUCKET}/{S3_PREFIX}"
@@ -493,59 +491,24 @@ def write_parquet_for_resolution(
         output_base = str(SCRATCH_DIR / "output" / "dem-terrain")
         Path(output_base).mkdir(parents=True, exist_ok=True)
 
+    output_path = f"{output_base}/h3_res={h3_res}/data.parquet"
+    if not S3_BUCKET:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
     t0 = time.time()
+    con.sql(f"""
+        COPY (
+            SELECT h3_index,
+                   ST_Point(lon, lat)::GEOMETRY('EPSG:4326') AS geometry,
+                   lat, lon, elev, slope, aspect, tri, tpi
+            FROM read_parquet('{temp_glob}')
+            ORDER BY h3_index
+        ) TO '{output_path}'
+        (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3,
+         ROW_GROUP_SIZE 1000000)
+    """)
+    log.info("  Wrote %s (%d rows) in %.1fs", output_path, total_rows, time.time() - t0)
 
-    if h3_res <= 5:
-        output_path = f"{output_base}/h3_res={h3_res}/data.parquet"
-        if not S3_BUCKET:
-            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-
-        con.sql(f"""
-            COPY (
-                SELECT h3_index,
-                       ST_Point(lon, lat)::GEOMETRY('EPSG:4326') AS geometry,
-                       lat, lon, elev, slope, aspect, tri, tpi
-                FROM tile_df
-                ORDER BY h3_index
-            ) TO '{output_path}'
-            (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3,
-             ROW_GROUP_SIZE 1000000)
-        """)
-        log.info("  Wrote %s in %.1fs", output_path, time.time() - t0)
-    else:
-        parents = [h3.cell_to_parent(cell, H3_PARENT_RES) for cell in merged["h3_index"]]
-        unique_parents = set(parents)
-        parent_col = pa.array(parents, type=pa.string())
-        table_with_parent = table.append_column("h3_parent_2", parent_col)
-        con.register("tile_df_partitioned", table_with_parent)
-
-        output_dir = f"{output_base}/h3_res={h3_res}"
-        if not S3_BUCKET:
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
-
-        con.sql(f"""
-            COPY (
-                SELECT h3_index,
-                       ST_Point(lon, lat)::GEOMETRY('EPSG:4326') AS geometry,
-                       lat, lon, elev, slope, aspect, tri, tpi,
-                       h3_parent_2
-                FROM tile_df_partitioned
-                ORDER BY h3_index
-            ) TO '{output_dir}'
-            (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3,
-             ROW_GROUP_SIZE 1000000, PARTITION_BY (h3_parent_2),
-             OVERWRITE_OR_IGNORE)
-        """)
-        log.info(
-            "  Wrote %d partitions to %s/ in %.1fs",
-            len(unique_parents),
-            output_dir,
-            time.time() - t0,
-        )
-
-        con.unregister("tile_df_partitioned")
-
-    con.unregister("tile_df")
     return total_rows
 
 
@@ -555,10 +518,10 @@ def write_parquet_for_resolution(
 
 
 def load_checkpoint() -> dict:
-    """Load processing checkpoint (which tiles are done)."""
+    """Load processing checkpoint (which windows are done)."""
     if CHECKPOINT_FILE.exists():
         return json.loads(CHECKPOINT_FILE.read_text())
-    return {"completed_tiles": {}, "completed_resolutions": []}
+    return {"completed_windows": {}, "completed_resolutions": []}
 
 
 def save_checkpoint(state: dict) -> None:
@@ -577,16 +540,12 @@ def write_metadata(total_cells: dict[int, int], elapsed_seconds: float) -> None:
     metadata = {
         "dataset": "dem-terrain",
         "source": "GEDTM-30m (OpenLandMap)",
-        "source_url": "https://stac.openlandmap.org/gedtm-30m/collection.json",
+        "source_url": DEM_COG_URL,
         "crs": "EPSG:4326",
         "geometry_type": "native_parquet_2.11_geometry",
         "geometry_encoding": "WKB with GEOMETRY logical type annotation",
         "h3_resolutions": list(range(1, 11)),
-        "h3_parent_partition_res": H3_PARENT_RES,
-        "partitioning": {
-            "res_1_to_5": "single file per resolution",
-            "res_6_to_10": f"hive-partitioned by h3_parent_{H3_PARENT_RES}",
-        },
+        "layout": "single Parquet file per resolution, sorted by h3_index",
         "columns": {
             "h3_index": "H3 cell ID (hex string)",
             "geometry": "Cell center as POINT, native Parquet 2.11+ GEOMETRY('EPSG:4326')",
@@ -608,7 +567,7 @@ def write_metadata(total_cells: dict[int, int], elapsed_seconds: float) -> None:
         import boto3
 
         s3 = boto3.client("s3", region_name=AWS_REGION)
-        key = f"{S3_PREFIX}/_metadata.json" if S3_PREFIX else "dem-terrain/_metadata.json"
+        key = f"{S3_PREFIX}/_metadata.json" if S3_PREFIX else "_metadata.json"
         s3.put_object(
             Bucket=S3_BUCKET,
             Key=key,
@@ -630,11 +589,15 @@ def write_metadata(total_cells: dict[int, int], elapsed_seconds: float) -> None:
 
 def process_resolution_group(
     group: ResolutionGroup,
-    tiles: list[dict],
+    windows: list[dict],
+    dem_path: str,
     checkpoint: dict,
     con: duckdb.DuckDBPyConnection,
 ) -> dict[int, int]:
-    """Process all tiles for a resolution group.
+    """Process all windows for a resolution group.
+
+    For each window: read DEM, compute terrain, generate H3 cells, write temp
+    Parquet. After all windows: merge temp files to final output via DuckDB.
 
     Returns dict mapping h3_res -> total cells written.
     """
@@ -645,35 +608,39 @@ def process_resolution_group(
         group.dem_resolution,
     )
 
-    # Accumulate records per H3 resolution
-    records: dict[int, list[dict[str, list]]] = {r: [] for r in group.h3_resolutions}
+    temp_dir = SCRATCH_DIR / "temp" / group.name
+    temp_dir.mkdir(parents=True, exist_ok=True)
 
     skipped = 0
-    for i, tile in enumerate(tqdm(tiles, desc=f"Tiles ({group.name})", unit="tile")):
-        tile_key = f"{group.name}:{tile['id']}"
-        if tile_key in checkpoint["completed_tiles"]:
+    processed = 0
+
+    for i, win in enumerate(tqdm(windows, desc=f"Windows ({group.name})", unit="win")):
+        win_key = f"{group.name}:{win['id']}"
+        if win_key in checkpoint["completed_windows"]:
             skipped += 1
             continue
 
-        tile_t0 = time.time()
+        win_t0 = time.time()
+        bbox = win["bbox"]
         log.info(
-            "[%d/%d] Tile %s bbox=[%.1f,%.1f,%.1f,%.1f] (mem=%s)",
+            "[%d/%d] Window %s bbox=[%.1f,%.1f,%.1f,%.1f] (mem=%s)",
             i + 1,
-            len(tiles),
-            tile["id"],
-            *tile["bbox"],
+            len(windows),
+            win["id"],
+            *bbox,
             _mem_gb(),
         )
 
         # Load DEM at target resolution
-        dem_data = load_dem_tile(tile["url"], group.dem_resolution, tile["bbox"])
+        dem_data = load_dem_window(dem_path, bbox, group.dem_resolution)
         if dem_data is None:
-            checkpoint["completed_tiles"][tile_key] = "skipped_no_data"
+            log.info("  Window all-NaN (ocean/nodata), skipping")
+            checkpoint["completed_windows"][win_key] = "skipped_no_data"
             save_checkpoint(checkpoint)
             continue
 
         # Compute terrain derivatives
-        lat_center = (tile["bbox"][1] + tile["bbox"][3]) / 2.0
+        lat_center = (bbox[1] + bbox[3]) / 2.0
         deriv_t0 = time.time()
         derivatives = compute_terrain_derivatives(
             dem_data["elevation"],
@@ -681,33 +648,59 @@ def process_resolution_group(
             dem_data["pixel_size_y"],
             lat_center,
         )
-        log.info("  Terrain derivatives computed in %.1fs", time.time() - deriv_t0)
+        log.info("  Terrain derivatives in %.1fs", time.time() - deriv_t0)
 
         # For each target H3 resolution
-        tile_cells = 0
+        win_cells = 0
         for h3_res in group.h3_resolutions:
-            cells = generate_h3_cells_for_tile(tile["bbox"], h3_res)
+            h3_t0 = time.time()
+            cells = generate_h3_cells_for_window(bbox, h3_res)
             if not cells:
                 continue
 
             cell_data = interpolate_terrain_to_cells(cells, dem_data, derivatives)
-            records[h3_res].append(cell_data)
-            tile_cells += len(cells)
-            log.info("  H3 res %d: %d cells", h3_res, len(cells))
+
+            # Filter out cells with no valid elevation (ocean/nodata)
+            valid = [j for j, e in enumerate(cell_data["elev"]) if e is not None]
+            if not valid:
+                continue
+
+            columns = {
+                "h3_index": pa.array([cell_data["h3_index"][j] for j in valid], type=pa.string()),
+                "lat": pa.array([cell_data["lat"][j] for j in valid], type=pa.float32()),
+                "lon": pa.array([cell_data["lon"][j] for j in valid], type=pa.float32()),
+                "elev": pa.array([cell_data["elev"][j] for j in valid], type=pa.float32()),
+                "slope": pa.array([cell_data["slope"][j] for j in valid], type=pa.float32()),
+                "aspect": pa.array([cell_data["aspect"][j] for j in valid], type=pa.float32()),
+                "tri": pa.array([cell_data["tri"][j] for j in valid], type=pa.float32()),
+                "tpi": pa.array([cell_data["tpi"][j] for j in valid], type=pa.float32()),
+            }
+
+            table = pa.table(columns)
+
+            # Write temp Parquet file
+            res_dir = temp_dir / f"h3_res={h3_res}"
+            res_dir.mkdir(parents=True, exist_ok=True)
+            pq.write_table(table, res_dir / f"{win['id']}.parquet", compression="zstd")
+
+            win_cells += len(valid)
+            log.info("  H3 res %d: %d cells (%.1fs)", h3_res, len(valid), time.time() - h3_t0)
 
         log.info(
-            "  Tile done: %d total cells in %.1fs",
-            tile_cells,
-            time.time() - tile_t0,
+            "  Window done: %d total cells in %.1fs",
+            win_cells,
+            time.time() - win_t0,
         )
 
-        checkpoint["completed_tiles"][tile_key] = "done"
+        processed += 1
+        checkpoint["completed_windows"][win_key] = "done"
         save_checkpoint(checkpoint)
 
     if skipped > 0:
-        log.info("Skipped %d already-processed tiles (from checkpoint)", skipped)
+        log.info("Skipped %d already-processed windows (from checkpoint)", skipped)
+    log.info("Processed %d windows for group '%s'", processed, group.name)
 
-    # Write Parquet for each resolution
+    # Merge temp files to final output via DuckDB
     cells_written = {}
     for h3_res in group.h3_resolutions:
         res_key = f"res_{h3_res}"
@@ -715,11 +708,16 @@ def process_resolution_group(
             log.info("Skipping already-written H3 res %d", h3_res)
             continue
 
-        count = write_parquet_for_resolution(con, records[h3_res], h3_res)
+        count = merge_temp_to_final(con, temp_dir, h3_res)
         cells_written[h3_res] = count
 
         checkpoint.setdefault("completed_resolutions", []).append(res_key)
         save_checkpoint(checkpoint)
+
+    # Clean up temp files for this group
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+        log.info("Cleaned up temp files for group '%s'", group.name)
 
     return cells_written
 
@@ -737,13 +735,19 @@ def main() -> None:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Discover tiles and print count without processing",
+        help="List windows without processing",
     )
     parser.add_argument(
         "--scratch-dir",
         type=str,
         default=None,
         help="Override scratch directory (default: /data/scratch or $SCRATCH_DIR)",
+    )
+    parser.add_argument(
+        "--dem-path",
+        type=str,
+        default=None,
+        help="Path to local DEM COG (default: auto-detect in scratch dir, fallback to remote URL)",
     )
     args = parser.parse_args()
 
@@ -754,34 +758,36 @@ def main() -> None:
 
     target_resolutions = set(int(r) for r in args.resolutions.split(","))
 
+    # Resolve DEM source (local file > remote URL)
+    dem_path = resolve_dem_path(args.dem_path)
+
+    # Generate geographic windows
+    windows = generate_windows()
+
     start = time.time()
     log.info("=" * 60)
     log.info("Starting DEM to Parquet pipeline")
+    log.info("  DEM source: %s", dem_path)
+    log.info("  Windows: %d (%g° x %g°)", len(windows), WINDOW_SIZE, WINDOW_SIZE)
     log.info("  Target resolutions: %s", sorted(target_resolutions))
     log.info("  Output: %s", f"s3://{S3_BUCKET}/{S3_PREFIX}/" if S3_BUCKET else "local")
     log.info("  Scratch: %s", SCRATCH_DIR)
     log.info("  Memory: %s", _mem_gb())
     log.info("=" * 60)
 
-    # Discover tiles
-    tiles = discover_tiles()
-    if not tiles:
-        log.error("No tiles found — check STAC catalog connectivity")
-        sys.exit(1)
-
     if args.dry_run:
-        log.info("Dry run — %d tiles discovered. Exiting.", len(tiles))
-        for t in tiles[:5]:
-            log.info("  Example: %s bbox=%s", t["id"], t["bbox"])
-        if len(tiles) > 5:
-            log.info("  ... and %d more", len(tiles) - 5)
+        log.info("Dry run — %d windows generated. Examples:", len(windows))
+        for w in windows[:5]:
+            log.info("  %s bbox=%s", w["id"], w["bbox"])
+        if len(windows) > 5:
+            log.info("  ... and %d more", len(windows) - 5)
         return
 
     # Load checkpoint
     checkpoint = load_checkpoint()
     log.info(
-        "Checkpoint: %d tiles previously completed",
-        len(checkpoint.get("completed_tiles", {})),
+        "Checkpoint: %d windows previously completed",
+        len(checkpoint.get("completed_windows", {})),
     )
 
     # Setup DuckDB
@@ -801,7 +807,7 @@ def main() -> None:
             dem_resolution=group.dem_resolution,
             description=group.description,
         )
-        cells = process_resolution_group(filtered_group, tiles, checkpoint, con)
+        cells = process_resolution_group(filtered_group, windows, dem_path, checkpoint, con)
         total_cells.update(cells)
 
     elapsed = time.time() - start
