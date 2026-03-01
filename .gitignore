@@ -1,0 +1,8 @@
+.env
+*.tfvars
+.terraform/
+*.tfstate
+*.tfstate.backup
+__pycache__/
+.venv/
+infra/secrets.tfvars

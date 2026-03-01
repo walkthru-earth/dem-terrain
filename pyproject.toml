@@ -1,0 +1,45 @@
+[project]
+name = "dem-terrain"
+version = "0.1.0"
+description = "Global DEM to H3-indexed native Parquet 2.11+ terrain derivatives"
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb==1.5.0.dev329",
+    "h3==4.4.2",
+    "numpy==2.4.2",
+    "rasterio==1.5.0",
+    "scipy==1.17.1",
+    "pyarrow==23.0.1",
+    "pystac-client==0.9.0",
+    "tqdm==4.67.3",
+    "boto3==1.42.59",
+]
+
+[project.optional-dependencies]
+gpu = ["cupy-cuda12x==14.0.1"]
+
+[dependency-groups]
+dev = [
+    "ruff==0.15.4",
+    "pre-commit==4.5.1",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "TCH",  # flake8-type-checking
+    "RUF",  # ruff-specific
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dem_terrain"]
