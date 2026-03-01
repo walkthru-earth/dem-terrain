@@ -9,8 +9,8 @@ graph LR
         F[tofu destroy] --> G[Cleans up]
     end
 
-    subgraph Cloud["Verda H200 instance"]
-        C[startup.sh] --> D[Install uv, GDAL, CUDA]
+    subgraph Cloud["Verda CPU Node (360 vCPUs, 1440GB RAM)"]
+        C[startup.sh] --> D[Install uv, GDAL]
         D --> E[uv run main.py]
     end
 
@@ -34,7 +34,7 @@ flowchart TD
     F --> G
 
     G --> G1[Load COG via rasterio]
-    G1 --> G2[Compute terrain derivatives<br/>GPU: CuPy / CPU: NumPy]
+    G1 --> G2[Compute terrain derivatives<br/>NumPy]
     G2 --> G3[Generate H3 cells<br/>ownership: center in tile bbox]
     G3 --> G4[Interpolate terrain<br/>to cell centers]
     G4 --> G5[Checkpoint tile ✓]
@@ -149,13 +149,13 @@ If the pipeline crashes or is interrupted, restart it and it will skip already-c
 
 ## Cloud instance
 
-| Instance | CPUs | RAM | VRAM | Recommendation |
-|----------|------|-----|------|----------------|
-| 1A100.22V | 22 | 120 GB | 80 GB | Sufficient but slower on CPU-bound H3 |
-| **1H200.44V** | **44** | **182 GB** | **141 GB** | **Best: most CPUs, fast GPU** |
-| 1B200.30V | 30 | 184 GB | 180 GB | More VRAM (unused), fewer CPUs |
+| Instance | CPUs | RAM | Cost/h | Recommendation |
+|----------|------|-----|--------|----------------|
+| **CPU.360V.1440G** | **360** | **1440 GB** | **$2.51** | **Best: 360 cores for NumPy/GDAL, 1440GB handles res 10 accumulation** |
+| 1H200.44V | 44 | 182 GB | $3.39 | GPU overkill — terrain derivatives are fast on CPU |
+| 1A100.22V | 22 | 120 GB | — | Too few CPUs, not enough RAM for res 10 |
 
-Estimated processing time: **~8-12 hours** on H200 (GPU-accelerated terrain derivatives, parallel tile I/O).
+Estimated processing time: **~8-12 hours** on CPU Node (NumPy terrain derivatives, parallel tile I/O with 360 cores).
 
 ## Verification
 

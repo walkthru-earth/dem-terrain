@@ -25,7 +25,7 @@ Each file contains: `h3_index`, `geometry` (native Parquet GEOMETRY), `lat`, `lo
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
 - [OpenTofu](https://opentofu.org/) (for cloud deployment)
 - AWS credentials with S3 write access
-- Verda cloud account (for GPU instance)
+- Verda cloud account (for cloud instance)
 
 ## Quick start
 
@@ -49,7 +49,7 @@ uv run python main.py --resolutions 1,2,3,4,5 --scratch-dir ./scratch
 
 ## Cloud deployment (full global run)
 
-The full pipeline (res 1-10) needs a GPU instance with ~182 GB RAM. See [docs/workflow.md](docs/workflow.md) for the complete workflow.
+The full pipeline (res 1-10) needs a CPU Node with ~1440 GB RAM (360 vCPUs). See [docs/workflow.md](docs/workflow.md) for the complete workflow.
 
 ```bash
 cd infra/
