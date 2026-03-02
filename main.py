@@ -486,7 +486,7 @@ def merge_temp_to_final(
     temp_glob = str(res_temp_dir / "*.parquet")
 
     # Count rows
-    total_rows = con.sql(f"SELECT count(*) FROM read_parquet('{temp_glob}')").fetchone()[0]
+    total_rows = con.sql(f"SELECT count(*) FROM read_parquet('{temp_glob}', hive_partitioning=false)").fetchone()[0]
     if total_rows == 0:
         log.warning("No rows for H3 res %d — skipping", h3_res)
         return 0
@@ -509,7 +509,7 @@ def merge_temp_to_final(
             SELECT h3_index,
                    ST_Point(lon, lat)::GEOMETRY('EPSG:4326') AS geometry,
                    lat, lon, elev, slope, aspect, tri, tpi
-            FROM read_parquet('{temp_glob}')
+            FROM read_parquet('{temp_glob}', hive_partitioning=false)
             ORDER BY h3_index
         ) TO '{output_path}'
         (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3,
