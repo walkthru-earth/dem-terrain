@@ -3,9 +3,9 @@
 Converts GEDTM-30m global DEM to H3-indexed, partitioned native Parquet files
 with terrain derivatives (elevation, slope, aspect, TRI, TPI).
 
-DuckDB 1.5.0-dev writes native Parquet GEOMETRY (first-class logical type with
-per-row-group bounding box stats, geometry shredding, and spatial predicate
-pushdown). This is NOT GeoParquet's metadata convention.
+DuckDB 1.5.0-dev writes native Parquet GEOMETRY logical type (GEOPARQUET_VERSION
+'BOTH') with per-row-group geo_types stats AND GeoParquet 1.0 'geo' file-level
+metadata for backwards compatibility with older tools (QGIS, pyarrow, etc).
 
 The pipeline reads from a single global COG (Cloud Optimized GeoTIFF) using
 windowed reads. If a local copy exists on NVMe, it uses that for speed;
@@ -513,7 +513,7 @@ def merge_temp_to_final(
             ORDER BY h3_index
         ) TO '{output_path}'
         (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3,
-         ROW_GROUP_SIZE 1000000)
+         ROW_GROUP_SIZE 1000000, GEOPARQUET_VERSION 'BOTH')
     """)
     log.info("  Wrote %s (%d rows) in %.1fs", output_path, total_rows, time.time() - t0)
 
