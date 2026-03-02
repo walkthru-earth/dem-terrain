@@ -15,7 +15,7 @@ Reads a single global GEDTM-30m COG (~305 GB) via windowed reads, computes terra
 
 ## Tech choices
 
-- **DuckDB 1.5.0-dev** writes native Parquet GEOMETRY (not GeoParquet convention) — `ST_Point(lon, lat)::GEOMETRY('EPSG:4326')` gives per-row-group bbox stats and geometry shredding automatically
+- **DuckDB 1.5.0-dev** writes native Parquet GEOMETRY via `GEOPARQUET_VERSION 'BOTH'` — `ST_Point(lon, lat)::GEOMETRY('EPSG:4326')` gives native Parquet 2.11+ GEOMETRY logical type (per-row-group `geo_types` stats) AND GeoParquet 1.0 `geo` metadata for backwards compatibility
 - **CPU Node** (no GPU) — terrain derivatives run fine on NumPy with 360 cores. CuPy/GPU fallback exists but isn't needed
 - **Single file per resolution** — no Hive partitioning; DuckDB native geometry gives per-row-group bbox pushdown
 - **Local COG auto-detection** — uses local file on NVMe if available, falls back to remote URL
