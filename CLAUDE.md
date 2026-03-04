@@ -25,11 +25,10 @@ Reads a single global GEDTM-30m COG (~305 GB) via windowed reads, computes terra
 
 ```
 s3://{bucket}/{prefix}/
-  h3_res=1/data.parquet      # ~1 KB
-  h3_res=2/data.parquet      # ~20 KB
+  h3_res=1/data.parquet      # 12 KB
+  h3_res=2/data.parquet      # 57 KB
   ...
-  h3_res=10/data.parquet     # ~170 GB (single file, sorted by h3_index)
-  _metadata.json
+  h3_res=10/data.parquet     # 244.7 GB (single file, sorted by h3_index)
 ```
 
 ## Schema per file

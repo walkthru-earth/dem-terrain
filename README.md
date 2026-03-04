@@ -8,20 +8,19 @@ Replaces the 20-40 min on-the-fly DEM load in [walkthru-weather-index](../walkth
 
 ```
 s3://{bucket}/{prefix}/
-  h3_res=1/data.parquet       11 KB       223 cells
-  h3_res=2/data.parquet       56 KB     1,546 cells
-  h3_res=3/data.parquet      372 KB    10,851 cells
-  h3_res=4/data.parquet      2.5 MB    76,135 cells
-  h3_res=5/data.parquet       17 MB   533,062 cells
-  h3_res=6/data.parquet      ~70 MB      ~4M cells
-  h3_res=7/data.parquet     ~500 MB     ~28M cells
-  h3_res=8/data.parquet     ~3.5 GB    ~200M cells
-  h3_res=9/data.parquet      ~25 GB    ~1.4B cells
-  h3_res=10/data.parquet    ~170 GB     ~10B cells
-  _metadata.json
+  h3_res=1/data.parquet       12 KB           223 cells
+  h3_res=2/data.parquet       57 KB         1,546 cells
+  h3_res=3/data.parquet      373 KB        10,851 cells
+  h3_res=4/data.parquet      2.5 MB        76,135 cells
+  h3_res=5/data.parquet       17 MB       533,062 cells
+  h3_res=6/data.parquet      115 MB     3,730,922 cells
+  h3_res=7/data.parquet      783 MB    26,115,785 cells
+  h3_res=8/data.parquet      5.3 GB   182,814,924 cells
+  h3_res=9/data.parquet     36.1 GB 1,279,700,961 cells
+  h3_res=10/data.parquet   244.7 GB 8,957,910,337 cells
 ```
 
-Single file per resolution, sorted by `h3_index`. Schema: `h3_index` (VARCHAR), `geometry` (native Parquet GEOMETRY POINT EPSG:4326), `lat`, `lon`, `elev`, `slope`, `aspect`, `tri`, `tpi` (all FLOAT).
+**Total: 10,450,894,746 cells (~10.5 billion) in ~287 GB.** Single file per resolution, sorted by `h3_index`. Schema: `h3_index` (VARCHAR), `geometry` (native Parquet GEOMETRY POINT EPSG:4326), `lat`, `lon`, `elev`, `slope`, `aspect`, `tri`, `tpi` (all FLOAT).
 
 ## Prerequisites
 
