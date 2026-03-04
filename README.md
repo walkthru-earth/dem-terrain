@@ -8,16 +8,17 @@ Replaces the 20-40 min on-the-fly DEM load in [walkthru-weather-index](../walkth
 
 ```
 s3://{bucket}/{prefix}/
-  h3_res=1/data.parquet       12 KB           223 cells
-  h3_res=2/data.parquet       57 KB         1,546 cells
-  h3_res=3/data.parquet      373 KB        10,851 cells
-  h3_res=4/data.parquet      2.5 MB        76,135 cells
-  h3_res=5/data.parquet       17 MB       533,062 cells
-  h3_res=6/data.parquet      115 MB     3,730,922 cells
-  h3_res=7/data.parquet      783 MB    26,115,785 cells
-  h3_res=8/data.parquet      5.3 GB   182,814,924 cells
-  h3_res=9/data.parquet     36.1 GB 1,279,700,961 cells
-  h3_res=10/data.parquet   244.7 GB 8,957,910,337 cells
+  h3/
+    h3_res=1/data.parquet       12 KB           223 cells
+    h3_res=2/data.parquet       57 KB         1,546 cells
+    h3_res=3/data.parquet      373 KB        10,851 cells
+    h3_res=4/data.parquet      2.5 MB        76,135 cells
+    h3_res=5/data.parquet       17 MB       533,062 cells
+    h3_res=6/data.parquet      115 MB     3,730,922 cells
+    h3_res=7/data.parquet      783 MB    26,115,785 cells
+    h3_res=8/data.parquet      5.3 GB   182,814,924 cells
+    h3_res=9/data.parquet     36.1 GB 1,279,700,961 cells
+    h3_res=10/data.parquet   244.7 GB 8,957,910,337 cells
 ```
 
 **Total: 10,450,894,746 cells (~10.5 billion) in ~287 GB.** Single file per resolution, sorted by `h3_index`. Schema: `h3_index` (VARCHAR), `geometry` (native Parquet GEOMETRY POINT EPSG:4326), `lat`, `lon`, `elev`, `slope`, `aspect`, `tri`, `tpi` (all FLOAT).
@@ -75,7 +76,7 @@ INSTALL httpfs;  LOAD httpfs;
 SET s3_region = 'us-west-2';
 
 SELECT h3_index, elev, slope, aspect, tri, tpi
-FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/h3_res=5/data.parquet')
+FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/h3/h3_res=5/data.parquet')
 WHERE lat BETWEEN 27.5 AND 28.5
   AND lon BETWEEN 86.5 AND 87.5
 ORDER BY elev DESC
@@ -89,6 +90,12 @@ uv sync --group dev
 uv run pre-commit install
 uv run ruff check . && uv run ruff format .
 ```
+
+## Source
+
+> Ho, Y., Grohmann, C. H., Lindsay, J., Reuter, H. I., Parente, L., Witjes, M., & Hengl, T. (2025). GEDTM30: global ensemble digital terrain model at 30 m and derived multiscale terrain variables. *PeerJ*, 13, e19673. [doi:10.7717/peerj.19673](https://doi.org/10.7717/peerj.19673)
+>
+> Dataset: [doi:10.5281/zenodo.14900181](https://doi.org/10.5281/zenodo.14900181)
 
 ## License
 

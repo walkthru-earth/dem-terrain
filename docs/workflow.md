@@ -163,11 +163,11 @@ After the pipeline completes:
 
 ```sql
 -- 1. Confirm native GEOMETRY type (not BYTE_ARRAY)
-SELECT * FROM parquet_schema('s3://bucket/prefix/dem-terrain/h3_res=5/data.parquet');
+SELECT * FROM parquet_schema('s3://bucket/prefix/dem-terrain/h3/h3_res=5/data.parquet');
 
 -- 2. Spot-check known elevations (Mount Everest area)
 SELECT h3_index, elev, slope
-FROM read_parquet('s3://bucket/prefix/dem-terrain/h3_res=5/data.parquet')
+FROM read_parquet('s3://bucket/prefix/dem-terrain/h3/h3_res=5/data.parquet')
 WHERE lat BETWEEN 27.5 AND 28.5 AND lon BETWEEN 86.5 AND 87.5
 ORDER BY elev DESC LIMIT 5;
 
