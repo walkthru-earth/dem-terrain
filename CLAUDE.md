@@ -10,26 +10,35 @@ Reads a single global GEDTM-30m COG (~305 GB) via windowed reads, computes terra
 
 - `main.py` — the entire pipeline (windowed COG reads → terrain derivatives → H3 cells → DuckDB Parquet write)
 - `infra/` — OpenTofu for Verda cloud (CPU Node: 360 vCPUs, 1440GB RAM)
-- `.env` / `.env.example` — S3 credentials and config
-- `infra/secrets.tfvars.example` — Verda + AWS credentials for cloud deploy
+- `.env` / `.env.example` — S3 credentials and config (`.env` is gitignored)
+- `infra/secrets.tfvars.example` — Verda + AWS credentials template (actual `.tfvars` is gitignored)
+
+## Source data
+
+- **GEDTM-30m** COG URL (in `main.py`): `https://s3.opengeohub.org/global/edtm/legendtm_rf_30m_m_s_20000101_20231231_go_epsg.4326_v20250130.tif`
+- Citation: Ho, Y. et al. (2025). GEDTM30. *PeerJ*, 13, e19673. [doi:10.7717/peerj.19673](https://doi.org/10.7717/peerj.19673)
+- Dataset DOI: [10.5281/zenodo.14900181](https://doi.org/10.5281/zenodo.14900181)
 
 ## Tech choices
 
 - **DuckDB 1.5.0-dev** writes native Parquet GEOMETRY via `GEOPARQUET_VERSION 'BOTH'` — `ST_Point(lon, lat)::GEOMETRY('EPSG:4326')` gives native Parquet 2.11+ GEOMETRY logical type (per-row-group `geo_types` stats) AND GeoParquet 1.0 `geo` metadata for backwards compatibility
-- **CPU Node** (no GPU) — terrain derivatives run fine on NumPy with 360 cores. CuPy/GPU fallback exists but isn't needed
+- **CPU Node** (no GPU) — terrain derivatives run fine on NumPy with 360 cores
 - **Single file per resolution** — no Hive partitioning; DuckDB native geometry gives per-row-group bbox pushdown
 - **Local COG auto-detection** — uses local file on NVMe if available, falls back to remote URL
-- **Checkpointing** — `checkpoint.json` tracks completed windows and merged resolutions, pipeline is fully resumable (see below)
+- **Checkpointing** — `checkpoint.json` tracks completed windows and merged resolutions, pipeline is fully resumable
 
-## Output layout
+## S3 output layout
 
 ```
-s3://{bucket}/{prefix}/
-  h3_res=1/data.parquet      # 12 KB
-  h3_res=2/data.parquet      # 57 KB
-  ...
-  h3_res=10/data.parquet     # 244.7 GB (single file, sorted by h3_index)
+s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/
+  h3/
+    h3_res=1/data.parquet      # 12 KB
+    h3_res=2/data.parquet      # 57 KB
+    ...
+    h3_res=10/data.parquet     # 244.7 GB (single file, sorted by h3_index)
 ```
+
+**Status**: all resolutions 1–10 uploaded and live.
 
 ## Schema per file
 
@@ -64,9 +73,16 @@ The pipeline checkpoints to `/data/scratch/checkpoint.json` at two levels:
 
 Temp Parquet files in `/data/scratch/temp/{group}/` survive restarts. To resume after a crash, just rerun — it picks up where it left off. To force a full rerun: `rm /data/scratch/checkpoint.json`
 
+## Documentation files
+
+- `README.md` — GitHub repo README (code usage)
+- `SC_README.md` — Source Cooperative dataset README (uploaded to S3 as `README.md`)
+- `docs/workflow.md` — detailed pipeline workflow
+
 ## Conventions
 
 - Python 3.12+, pathlib (no os.path), ruff for lint+format
 - All deps pinned to exact versions in pyproject.toml
 - Logging is verbose — every tile logs: load time, raster size, terrain derivative time, H3 cell count, memory usage
 - `.env` for Python vars, `secrets.tfvars` for OpenTofu vars (both gitignored)
+- License: CC BY 4.0 by walkthru-earth
