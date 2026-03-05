@@ -11,19 +11,19 @@ Replaces the 20-40 min on-the-fly DEM load in [walkthru-weather-index](../walkth
 ```
 s3://{bucket}/{prefix}/
   v2/h3/
-    h3_res=1/data.parquet       12 KB           223 cells
-    h3_res=2/data.parquet       57 KB         1,546 cells
-    h3_res=3/data.parquet      373 KB        10,851 cells
-    h3_res=4/data.parquet      2.5 MB        76,135 cells
-    h3_res=5/data.parquet       17 MB       533,062 cells
-    h3_res=6/data.parquet      115 MB     3,730,922 cells
-    h3_res=7/data.parquet      783 MB    26,115,785 cells
-    h3_res=8/data.parquet      5.3 GB   182,814,924 cells
-    h3_res=9/data.parquet     36.1 GB 1,279,700,961 cells
-    h3_res=10/data.parquet   244.7 GB 8,957,910,337 cells
+    h3_res=1/data.parquet      5.3 KB           223 cells
+    h3_res=2/data.parquet     30.5 KB         1,546 cells
+    h3_res=3/data.parquet      204 KB        10,851 cells
+    h3_res=4/data.parquet      1.4 MB        76,135 cells
+    h3_res=5/data.parquet      9.7 MB       533,062 cells
+    h3_res=6/data.parquet     67.4 MB     3,730,922 cells
+    h3_res=7/data.parquet      476 MB    26,115,785 cells
+    h3_res=8/data.parquet      3.2 GB   182,814,924 cells
+    h3_res=9/data.parquet     22.1 GB 1,279,700,961 cells
+    h3_res=10/data.parquet   156.4 GB 8,957,910,337 cells
 ```
 
-**Total: 10,450,894,746 cells (~10.5 billion) in ~287 GB.** Single file per resolution, sorted by `h3_index`. Schema: `h3_index` (BIGINT), `elev`, `slope`, `aspect`, `tri`, `tpi` (all FLOAT). No geometry/lat/lon columns — derive coordinates via DuckDB h3 extension (`h3_cell_to_lat`, `h3_cell_to_lng`, `h3_cell_to_boundary_wkt`). Sorted int64 `h3_index` enables better delta encoding compression and range-based spatial queries via Parquet row group min/max statistics.
+**Total: 10,450,894,746 cells (~10.5 billion) in ~183 GB.** Single file per resolution, sorted by `h3_index`. Schema: `h3_index` (BIGINT), `elev`, `slope`, `aspect`, `tri`, `tpi` (all FLOAT). No geometry/lat/lon columns — derive coordinates via DuckDB h3 extension (`h3_cell_to_lat`, `h3_cell_to_lng`, `h3_cell_to_boundary_wkt`). Sorted int64 `h3_index` enables better delta encoding compression and range-based spatial queries via Parquet row group min/max statistics.
 
 ### v1 (legacy)
 

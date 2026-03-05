@@ -83,16 +83,16 @@ LIMIT 20;
 ```
 walkthru-earth/dem-terrain/
   v2/h3/
-    h3_res=1/data.parquet       12 KB           223 cells
-    h3_res=2/data.parquet       57 KB         1,546 cells
-    h3_res=3/data.parquet      373 KB        10,851 cells
-    h3_res=4/data.parquet      2.5 MB        76,135 cells
-    h3_res=5/data.parquet       17 MB       533,062 cells
-    h3_res=6/data.parquet      115 MB     3,730,922 cells
-    h3_res=7/data.parquet      783 MB    26,115,785 cells
-    h3_res=8/data.parquet      5.3 GB   182,814,924 cells
-    h3_res=9/data.parquet     36.1 GB 1,279,700,961 cells
-    h3_res=10/data.parquet   244.7 GB 8,957,910,337 cells
+    h3_res=1/data.parquet      5.3 KB           223 cells
+    h3_res=2/data.parquet     30.5 KB         1,546 cells
+    h3_res=3/data.parquet      204 KB        10,851 cells
+    h3_res=4/data.parquet      1.4 MB        76,135 cells
+    h3_res=5/data.parquet      9.7 MB       533,062 cells
+    h3_res=6/data.parquet     67.4 MB     3,730,922 cells
+    h3_res=7/data.parquet      476 MB    26,115,785 cells
+    h3_res=8/data.parquet      3.2 GB   182,814,924 cells
+    h3_res=9/data.parquet     22.1 GB 1,279,700,961 cells
+    h3_res=10/data.parquet   156.4 GB 8,957,910,337 cells
 ```
 
 ### v1 (legacy)
@@ -105,7 +105,23 @@ walkthru-earth/dem-terrain/
 
 Same cell counts and resolutions as v2.
 
-**Total: 10,450,894,746 cells (~10.5 billion) in ~287 GB.** Compression: ZSTD level 3. Row groups: 1,000,000 rows.
+### Size comparison
+
+| Res | Cells | v2 (BIGINT, 6 cols) | v1 (VARCHAR, 9 cols) | Reduction |
+|-----|------:|--------------------:|---------------------:|----------:|
+| 1 | 223 | 5.3 KB | 12.2 KB | 57% |
+| 2 | 1,546 | 30.5 KB | 57.4 KB | 47% |
+| 3 | 10,851 | 204 KB | 373 KB | 45% |
+| 4 | 76,135 | 1.4 MB | 2.5 MB | 44% |
+| 5 | 533,062 | 9.7 MB | 17 MB | 43% |
+| 6 | 3,730,922 | 67.4 MB | 115 MB | 41% |
+| 7 | 26,115,785 | 476 MB | 783 MB | 39% |
+| 8 | 182,814,924 | 3.2 GB | 5.3 GB | 40% |
+| 9 | 1,279,700,961 | 22.1 GB | 36.1 GB | 39% |
+| 10 | 8,957,910,337 | 156.4 GB | 244.7 GB | 36% |
+| **Total** | **10.5 B** | **~183 GB** | **~287 GB** | **36%** |
+
+Compression: ZSTD level 3. Row groups: 1,000,000 rows.
 
 ## Schema
 
