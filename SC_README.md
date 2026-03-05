@@ -1,16 +1,66 @@
 # Global DEM Terrain Derivatives
 
-H3-indexed terrain data from [GEDTM-30m](https://stac.openlandmap.org/gedtm-30m/collection.json) in [native Parquet 2.11+ GEOMETRY](https://github.com/apache/parquet-format/blob/master/Geospatial.md) format. Ten H3 resolutions (1–10), one file per resolution, sorted by `h3_index`.
+H3-indexed terrain data from [GEDTM-30m](https://stac.openlandmap.org/gedtm-30m/collection.json) in Apache Parquet format. Ten H3 resolutions (1–10), one file per resolution, sorted by `h3_index`. Available in two versions: **v2 (recommended)** with BIGINT `h3_index` and no geometry columns, and **v1 (legacy)** with VARCHAR `h3_index` and [native Parquet 2.11+ GEOMETRY](https://github.com/apache/parquet-format/blob/master/Geospatial.md).
 
 | | |
 |---|---|
 | **Source** | GEDTM-30m (OpenGeoHub), 30m resolution, global land coverage |
-| **Format** | Apache Parquet with native GEOMETRY logical type (DuckDB 1.5) |
+| **Format** | Apache Parquet — v2: BIGINT h3_index, no geometry; v1: VARCHAR h3_index, native GEOMETRY (DuckDB 1.5) |
 | **CRS** | EPSG:4326 (WGS 84) |
 | **License** | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) by [walkthru.earth](https://walkthru.earth/links) |
 | **Code** | [walkthru-earth/dem-terrain](https://github.com/walkthru-earth/dem-terrain) |
 
 ## Quick Start
+
+### v2 (recommended)
+
+```sql
+-- DuckDB — no spatial extension needed for v2
+INSTALL h3 FROM community; LOAD h3;
+INSTALL httpfs; LOAD httpfs;
+SET s3_region = 'us-west-2';
+
+SELECT h3_index,
+       h3_cell_to_lat(h3_index) AS lat,
+       h3_cell_to_lng(h3_index) AS lng,
+       elev, slope, aspect
+FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/v2/h3/h3_res=5/data.parquet')
+WHERE h3_index BETWEEN ? AND ?  -- row group statistics prune efficiently
+ORDER BY elev DESC
+LIMIT 20;
+```
+
+For deck.gl H3HexagonLayer (needs hex string):
+
+```sql
+SELECT h3_h3_to_string(h3_index) AS h3_hex, elev
+FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/v2/h3/h3_res=5/data.parquet')
+```
+
+```python
+# Python (v2)
+import duckdb
+
+con = duckdb.connect()
+con.install_extension("h3", repository="community"); con.load_extension("h3")
+for ext in ("httpfs",):
+    con.install_extension(ext); con.load_extension(ext)
+con.sql("SET s3_region = 'us-west-2'")
+
+df = con.sql("""
+    SELECT h3_index,
+           h3_cell_to_lat(h3_index) AS lat,
+           h3_cell_to_lng(h3_index) AS lng,
+           elev, slope, aspect, tri, tpi
+    FROM read_parquet(
+        's3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/v2/h3/h3_res=5/data.parquet'
+    )
+    ORDER BY elev DESC
+    LIMIT 100
+""").fetchdf()
+```
+
+### v1 (legacy — requires `INSTALL spatial`)
 
 ```sql
 -- DuckDB
@@ -19,34 +69,20 @@ INSTALL httpfs;  LOAD httpfs;
 SET s3_region = 'us-west-2';
 
 SELECT h3_index, elev, slope, aspect, tri, tpi
-FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/h3/h3_res=5/data.parquet')
+FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/v1/h3/h3_res=5/data.parquet')
 WHERE lat BETWEEN 35 AND 45
   AND lon BETWEEN -10 AND 5
 ORDER BY elev DESC
 LIMIT 20;
 ```
 
-```python
-# Python
-import duckdb
-
-con = duckdb.connect()
-for ext in ("spatial", "httpfs"):
-    con.install_extension(ext); con.load_extension(ext)
-con.sql("SET s3_region = 'us-west-2'")
-
-df = con.sql("""
-    SELECT * FROM read_parquet(
-        's3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/h3/h3_res=5/data.parquet'
-    ) WHERE lat BETWEEN 45 AND 48 AND lon BETWEEN 6 AND 9
-""").fetchdf()
-```
-
 ## Files
+
+### v2 (recommended)
 
 ```
 walkthru-earth/dem-terrain/
-  h3/
+  v2/h3/
     h3_res=1/data.parquet       12 KB           223 cells
     h3_res=2/data.parquet       57 KB         1,546 cells
     h3_res=3/data.parquet      373 KB        10,851 cells
@@ -59,9 +95,34 @@ walkthru-earth/dem-terrain/
     h3_res=10/data.parquet   244.7 GB 8,957,910,337 cells
 ```
 
+### v1 (legacy)
+
+```
+walkthru-earth/dem-terrain/
+  v1/h3/
+    h3_res=1/data.parquet  ...  h3_res=10/data.parquet
+```
+
+Same cell counts and resolutions as v2.
+
 **Total: 10,450,894,746 cells (~10.5 billion) in ~287 GB.** Compression: ZSTD level 3. Row groups: 1,000,000 rows.
 
 ## Schema
+
+### v2 (recommended)
+
+| Column | Type | Unit | Description |
+|--------|------|------|-------------|
+| `h3_index` | BIGINT | — | H3 cell ID (int64). Sorted for delta encoding compression and range-based queries. |
+| `elev` | FLOAT | meters | Elevation above sea level |
+| `slope` | FLOAT | degrees | Terrain slope (0 = flat, 90 = cliff) |
+| `aspect` | FLOAT | degrees | Slope direction (0/360 = N, 90 = E, 180 = S, 270 = W) |
+| `tri` | FLOAT | meters | Terrain Ruggedness Index — mean abs. elevation diff to 8 neighbors |
+| `tpi` | FLOAT | meters | Topographic Position Index — elevation minus mean of 8 neighbors (+ridge, -valley) |
+
+`geometry`, `lat`, and `lon` columns are removed in v2 — derive them via the DuckDB h3 extension: `h3_cell_to_lat(h3_index)`, `h3_cell_to_lng(h3_index)`, `h3_cell_to_boundary_wkt(h3_index)`.
+
+### v1 (legacy)
 
 | Column | Type | Unit | Description |
 |--------|------|------|-------------|
@@ -105,33 +166,68 @@ DEM is read at different resolutions depending on H3 level:
 
 ## More Examples
 
+### v2 queries
+
+```sql
+-- Range query on sorted BIGINT h3_index — row group min/max statistics prune efficiently
+INSTALL h3 FROM community; LOAD h3;
+INSTALL httpfs; LOAD httpfs;
+SET s3_region = 'us-west-2';
+
+SELECT h3_index,
+       h3_cell_to_lat(h3_index) AS lat,
+       h3_cell_to_lng(h3_index) AS lng,
+       elev, slope
+FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/v2/h3/h3_res=7/data.parquet')
+WHERE h3_index BETWEEN ? AND ?
+ORDER BY elev DESC
+LIMIT 100;
+
+-- Query across all resolutions (Hive partitioning)
+SELECT h3_res, h3_index, elev
+FROM read_parquet(
+    's3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/v2/h3/h3_res=*/data.parquet',
+    hive_partitioning = true
+)
+WHERE h3_res = 5
+ORDER BY elev DESC
+LIMIT 20;
+
+-- DuckDB-WASM (browser) — use HTTPS URL
+SELECT h3_index,
+       h3_cell_to_lat(h3_index) AS lat,
+       h3_cell_to_lng(h3_index) AS lng,
+       elev, slope
+FROM read_parquet(
+    'https://data.source.coop/walkthru-earth/dem-terrain/v2/h3/h3_res=5/data.parquet'
+)
+ORDER BY elev DESC
+LIMIT 100;
+```
+
+### v1 legacy queries (requires `INSTALL spatial`)
+
 ```sql
 -- Spatial pushdown using native geometry bbox stats (no lat/lon filter needed)
 SELECT h3_index, elev, slope
-FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/h3/h3_res=7/data.parquet')
+FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/v1/h3/h3_res=7/data.parquet')
 WHERE geometry && ST_MakeEnvelope(86.5, 27.5, 87.5, 28.5);
 
--- Query across all resolutions (Hive partitioning)
+-- lat/lon filtering (v1 only — these columns exist in v1)
 SELECT *
 FROM read_parquet(
-    's3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/h3/h3_res=*/data.parquet',
+    's3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/v1/h3/h3_res=*/data.parquet',
     hive_partitioning = true
 )
 WHERE h3_res = 5
   AND lat BETWEEN 27 AND 29 AND lon BETWEEN 86 AND 88;
-
--- DuckDB-WASM (browser) — use HTTPS URL
-SELECT h3_index, elev, slope
-FROM read_parquet(
-    'https://data.source.coop/walkthru-earth/dem-terrain/h3/h3_res=5/data.parquet'
-)
-WHERE lat BETWEEN 35 AND 40
-LIMIT 100;
 ```
 
 ## Geometry Format
 
-The `geometry` column is written with `GEOPARQUET_VERSION 'BOTH'`, providing dual compatibility:
+**v2** drops the `geometry` column entirely. Coordinates are derivable from the BIGINT `h3_index` via the DuckDB h3 extension (`h3_cell_to_lat`, `h3_cell_to_lng`, `h3_cell_to_boundary_wkt`). This eliminates the need for `INSTALL spatial` and reduces file size.
+
+**v1** retains the `geometry` column, written with `GEOPARQUET_VERSION 'BOTH'`, providing dual compatibility:
 
 - **Native Parquet 2.11+ GEOMETRY logical type** — per-row-group bounding box statistics for spatial filter pushdown. Supported by DuckDB 1.5+, Apache Arrow (Rust), Apache Iceberg, GDAL 3.12+.
 - **GeoParquet 1.0 `geo` file-level metadata** — backwards compatibility with older tools (QGIS, pyarrow, GeoPandas).

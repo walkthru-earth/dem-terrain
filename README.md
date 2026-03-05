@@ -6,9 +6,11 @@ Replaces the 20-40 min on-the-fly DEM load in [walkthru-weather-index](../walkth
 
 ## What it produces
 
+### v2 (recommended)
+
 ```
 s3://{bucket}/{prefix}/
-  h3/
+  v2/h3/
     h3_res=1/data.parquet       12 KB           223 cells
     h3_res=2/data.parquet       57 KB         1,546 cells
     h3_res=3/data.parquet      373 KB        10,851 cells
@@ -21,7 +23,17 @@ s3://{bucket}/{prefix}/
     h3_res=10/data.parquet   244.7 GB 8,957,910,337 cells
 ```
 
-**Total: 10,450,894,746 cells (~10.5 billion) in ~287 GB.** Single file per resolution, sorted by `h3_index`. Schema: `h3_index` (VARCHAR), `geometry` (native Parquet GEOMETRY POINT EPSG:4326), `lat`, `lon`, `elev`, `slope`, `aspect`, `tri`, `tpi` (all FLOAT).
+**Total: 10,450,894,746 cells (~10.5 billion) in ~287 GB.** Single file per resolution, sorted by `h3_index`. Schema: `h3_index` (BIGINT), `elev`, `slope`, `aspect`, `tri`, `tpi` (all FLOAT). No geometry/lat/lon columns — derive coordinates via DuckDB h3 extension (`h3_cell_to_lat`, `h3_cell_to_lng`, `h3_cell_to_boundary_wkt`). Sorted int64 `h3_index` enables better delta encoding compression and range-based spatial queries via Parquet row group min/max statistics.
+
+### v1 (legacy)
+
+```
+s3://{bucket}/{prefix}/
+  v1/h3/
+    h3_res=1/data.parquet  ...  h3_res=10/data.parquet
+```
+
+Same cell counts and resolutions as v2. Schema: `h3_index` (VARCHAR), `geometry` (native Parquet GEOMETRY POINT EPSG:4326), `lat`, `lon`, `elev`, `slope`, `aspect`, `tri`, `tpi` (all FLOAT).
 
 ## Prerequisites
 
@@ -70,13 +82,39 @@ To force a full rerun: `rm /data/scratch/checkpoint.json`
 
 ## Query the output
 
+### v2 (recommended)
+
+```sql
+INSTALL h3 FROM community; LOAD h3;
+INSTALL httpfs; LOAD httpfs;
+SET s3_region = 'us-west-2';
+
+SELECT h3_index,
+       h3_cell_to_lat(h3_index) AS lat,
+       h3_cell_to_lng(h3_index) AS lng,
+       elev, slope, aspect
+FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/v2/h3/h3_res=5/data.parquet')
+WHERE h3_index BETWEEN ? AND ?  -- row group statistics prune efficiently
+ORDER BY elev DESC
+LIMIT 5;
+```
+
+For deck.gl H3HexagonLayer (needs hex string):
+
+```sql
+SELECT h3_h3_to_string(h3_index) AS h3_hex, elev
+FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/v2/h3/h3_res=5/data.parquet')
+```
+
+### v1 (legacy — requires `INSTALL spatial`)
+
 ```sql
 INSTALL spatial; LOAD spatial;
 INSTALL httpfs;  LOAD httpfs;
 SET s3_region = 'us-west-2';
 
 SELECT h3_index, elev, slope, aspect, tri, tpi
-FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/h3/h3_res=5/data.parquet')
+FROM read_parquet('s3://us-west-2.opendata.source.coop/walkthru-earth/dem-terrain/v1/h3/h3_res=5/data.parquet')
 WHERE lat BETWEEN 27.5 AND 28.5
   AND lon BETWEEN 86.5 AND 87.5
 ORDER BY elev DESC
