@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Global DEM to H3-indexed native Parquet 2.11+ terrain derivatives"
 requires-python = ">=3.12"
 dependencies = [
-    "duckdb==1.5.0.dev329",
+    "duckdb==1.5.0.dev332",
     "h3==4.4.2",
     "numpy==2.4.2",
     "rasterio==1.5.0",
