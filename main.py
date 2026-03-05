@@ -443,7 +443,7 @@ def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
     log.info("Initializing DuckDB %s", duckdb.__version__)
     con = duckdb.connect()
 
-    for ext in ("spatial", "httpfs"):
+    for ext in ("httpfs",):
         con.install_extension(ext)
         con.load_extension(ext)
         log.info("  Extension '%s' loaded", ext)
@@ -506,14 +506,12 @@ def merge_temp_to_final(
     t0 = time.time()
     con.sql(f"""
         COPY (
-            SELECT h3_index,
-                   ST_Point(lon, lat)::GEOMETRY('EPSG:4326') AS geometry,
-                   lat, lon, elev, slope, aspect, tri, tpi
+            SELECT h3_index, elev, slope, aspect, tri, tpi
             FROM read_parquet('{temp_glob}', hive_partitioning=false)
             ORDER BY h3_index
         ) TO '{output_path}'
         (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3,
-         ROW_GROUP_SIZE 1000000, GEOPARQUET_VERSION 'BOTH')
+         ROW_GROUP_SIZE 1000000)
     """)
     log.info("  Wrote %s (%d rows) in %.1fs", output_path, total_rows, time.time() - t0)
 
@@ -550,21 +548,17 @@ def write_metadata(total_cells: dict[int, int], elapsed_seconds: float) -> None:
         "source": "GEDTM-30m (OpenLandMap)",
         "source_url": DEM_COG_URL,
         "crs": "EPSG:4326",
-        "geometry_type": "native_parquet_2.11_geometry",
-        "geometry_encoding": "WKB with GEOMETRY logical type annotation",
         "h3_resolutions": list(range(1, 11)),
         "layout": "single Parquet file per resolution, sorted by h3_index",
         "columns": {
-            "h3_index": "H3 cell ID (hex string)",
-            "geometry": "Cell center as POINT, native Parquet 2.11+ GEOMETRY('EPSG:4326')",
-            "lat": "Cell center latitude (float32)",
-            "lon": "Cell center longitude (float32)",
+            "h3_index": "H3 cell ID (int64, hex-encoded H3 index as integer)",
             "elev": "Mean elevation in meters (float32)",
             "slope": "Mean slope in degrees (float32)",
             "aspect": "Mean aspect in compass degrees, 0=N (float32)",
             "tri": "Terrain Ruggedness Index in meters (float32)",
             "tpi": "Topographic Position Index in meters (float32)",
         },
+        "h3_index_note": "Use h3.int_to_str(h3_index) to get hex string; h3.cell_to_latlng() for lat/lon; h3.cell_to_boundary() for geometry",
         "compression": "ZSTD level 3",
         "cells_per_resolution": {str(k): v for k, v in sorted(total_cells.items())},
         "processing_time_seconds": round(elapsed_seconds, 1),
@@ -674,9 +668,7 @@ def process_resolution_group(
                 continue
 
             columns = {
-                "h3_index": pa.array([cell_data["h3_index"][j] for j in valid], type=pa.string()),
-                "lat": pa.array([cell_data["lat"][j] for j in valid], type=pa.float32()),
-                "lon": pa.array([cell_data["lon"][j] for j in valid], type=pa.float32()),
+                "h3_index": pa.array([int(cell_data["h3_index"][j], 16) for j in valid], type=pa.int64()),
                 "elev": pa.array([cell_data["elev"][j] for j in valid], type=pa.float32()),
                 "slope": pa.array([cell_data["slope"][j] for j in valid], type=pa.float32()),
                 "aspect": pa.array([cell_data["aspect"][j] for j in valid], type=pa.float32()),
